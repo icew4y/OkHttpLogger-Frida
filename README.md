@@ -9,10 +9,13 @@
 执行命令启动`frida -U -l okhttp_poker.js -f com.example.demo --no-pause`
 
 > ②  调用函数开始执行
+-  **find() 要等完全启动并执行过网络请求后再进行调用**
+-  **hold() 要等完全启动再进行调用**
+-  **history() & resend() 只有可以重新发送的请求**
 
 #### 函数：
 ```
-  `find()`                                         寻找okhttp3关键类及函数	
+  `find()`                                         检查是否使用了Okhttp & 是否可能被混淆 & 寻找okhttp3关键类及函数	
   `switchLoader(\"okhttp3.OkHttpClient\")`         参数：静态分析到的okhttpclient类名
   `hold()`                                         开启HOOK拦截
   `history()`                                      打印可重新发送的请求
@@ -26,8 +29,6 @@
 找到特征类，说明使用了`okhttp`的库，并打印出是否被混淆。
 
 #### 抓取打印的样例
-
->  一次性请求太多会出现打印错乱现象，由于自己太菜，暂时没有解决这个问题,希望求得大佬指点,万分感谢!!!
 
 ###### 例子1
 ```

@@ -4,7 +4,7 @@
 例：frida -U -l okhttp_poker.js -f com.example.demo --no-pause
 接下来使用okhttp的所有请求将被拦截并打印出来；
 扩展函数：
-	find()                                         寻找okhttp3关键类及函数	
+	find()                                         检查是否使用了Okhttp & 是否可能被混淆 & 寻找okhttp3关键类及函数
 	switchLoader(\"okhttp3.OkHttpClient\")         参数：静态分析到的okhttpclient类名
 	hold()                                         开启HOOK拦截
 	history()                                      打印可重新发送的请求				
@@ -16,9 +16,7 @@
 
 原理：由于所有使用的okhttp框架的App发出的请求都是通过RealCall.java发出的，那么我们可以hook此类拿到request和response,
 也可以缓存下来每一个请求的call对象，进行再次请求，所以选择了此处进行hook。
-	
-
-						
+							
 */
 var Cls_Call = "okhttp3.Call";
 var Cls_CallBack = "okhttp3.Callback";
@@ -38,6 +36,7 @@ var F_rsp_code = "code";
 var F_rsp_headers = "headers";
 var F_rsp_message = "message";
 var F_rsp_request = "request";
+var M_CallBack_onFailure = "onFailure";
 var M_CallBack_onResponse = "onResponse";
 var M_Call_enqueue = "enqueue";
 var M_Call_execute = "execute";
@@ -54,19 +53,36 @@ var M_rspBody_contentType = "contentType";
 var M_rspBody_create = "create";
 var M_rspBody_source = "source";
 var M_rsp_newBuilder = "newBuilder";
-//----------------------------------
 
+
+//----------------------------------
+var JavaStringWapper = null;
+var JavaIntegerWapper = null;
+var JavaStringBufferWapper = null;
+var GsonWapper = null;
+var ListWapper = null;
+var ArrayListWapper = null;
+var ArraysWapper = null;
+var CharsetWapper = null;
+var CharacterWapper = null;
+
+var OkioByteStrngWapper = null;
+var OkioBufferWapper = null;
+
+var OkHttpClientWapper = null;
+var ResponseBodyWapper = null;
+var BufferWapper = null;
+//----------------------------------
 var CallCache = []
 var hookedArray = []
-//
-var filterArray = ["jpg", "png", "webp", "jpeg", "gif",".data"]
+var filterArray = ["jpg", "png", "webp", "jpeg", "gif", ".data"]
 
 
 function buildNewResponse(responseObject) {
     var newResponse = null;
     Java.perform(function () {
         try {
-            var logString = Java.use("java.lang.StringBuffer").$new()
+            var logString = JavaStringBufferWapper.$new()
 
             logString.append("").append("\n");
             logString.append("┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────").append("\n");
@@ -77,7 +93,6 @@ function buildNewResponse(responseObject) {
             logString.append("").append("\n");
 
             console.log(logString)
-
         } catch (error) {
             console.log("printAll ERROR : " + error);
         }
@@ -88,7 +103,7 @@ function buildNewResponse(responseObject) {
 
 function printAll(responseObject, logString) {
     try {
-        var request = getFieldValue(responseObject,F_rsp_request)
+        var request = getFieldValue(responseObject, F_rsp_request)
         printerRequest(request, logString)
     } catch (error) {
         console.log("print request error : ", error)
@@ -100,27 +115,24 @@ function printAll(responseObject, logString) {
 
 
 function printerRequest(request, logString) {
-    var javaString = Java.use("java.lang.String")
-    var BufferClsss = Java.use(Cls_okio_Buffer)
-    var Charset = Java.use("java.nio.charset.Charset")
-    var defChatset = Charset.forName("UTF-8")
-
-    var httpUrl = getFieldValue(request,F_req_url)
-
+    var defChatset = CharsetWapper.forName("UTF-8")
+    //URL
+    var httpUrl = getFieldValue(request, F_req_url)
     logString.append("| URL: " + httpUrl).append("\n")
     logString.append("|").append("\n")
-    logString.append("| Method: " + getFieldValue(request,F_req_method)).append("\n")
+    logString.append("| Method: " + getFieldValue(request, F_req_method)).append("\n")
     logString.append("|").append("\n")
-
-    var requestBody = getFieldValue(request,F_req_body);
+    var requestBody = getFieldValue(request, F_req_body);
     var hasRequestBody = true
     if (null == requestBody) {
         hasRequestBody = false
     }
-    var requestHeaders = getFieldValue(request,F_req_headers)
-    var headersSize = getHeaderSize(requestHeaders)
+    //Headers
+    var requestHeaders = getFieldValue(request, F_req_headers)
+    var headersList = headersToList(requestHeaders)
+    var headersSize = getHeaderSize(headersList)
 
-    logString.append("| Headers:").append("\n")
+    logString.append("| Request Headers: ").append("" + headersSize).append("\n")
     if (hasRequestBody) {
         var requestBody = getWrapper(requestBody)
         var contentType = requestBody[M_reqbody_contentType]()
@@ -133,22 +145,30 @@ function printerRequest(request, logString) {
             logString.append("|   " + tag + "Content-Length: " + contentLength).append("\n")
         }
     }
+    if (headersSize == 0) {
+        logString.append("|     no headers").append("\n")
+    }
     for (var i = 0; i < headersSize; i++) {
-        var name = getHeaderName(requestHeaders,i)
-        if (!javaString.$new("Content-Type").equalsIgnoreCase(name) && !javaString.$new("Content-Length").equalsIgnoreCase(name)) {
-            var value = getHeaderValue(requestHeaders,i)
+        var name = getHeaderName(headersList, i)
+        if (!JavaStringWapper.$new("Content-Type").equalsIgnoreCase(name) && !JavaStringWapper.$new("Content-Length").equalsIgnoreCase(name)) {
+            var value = getHeaderValue(headersList, i)
             var tag = i == (headersSize - 1) ? "└─" : "┌─"
             logString.append("|   " + tag + name + ": " + value).append("\n")
         }
     }
+    var shielded = filterUrl(httpUrl.toString())
+    if (shielded) {
+        logString.append("|" + "     File Request Body Omit.....").append("\n")
+        return;
+    }
     logString.append("|").append("\n")
     if (!hasRequestBody) {
         logString.append("|" + "--> END ").append("\n")
-    } else if (bodyEncoded(requestHeaders)) {
+    } else if (bodyEncoded(headersList)) {
         logString.append("|" + "--> END  (encoded body omitted > bodyEncoded)").append("\n")
     } else {
-        logString.append("| Body:").append("\n")
-        var buffer = BufferClsss.$new()
+        logString.append("| Request Body:").append("\n")
+        var buffer = BufferWapper.$new()
         requestBody[M_reqbody_writeTo](buffer)
         var reqByteString = getByteString(buffer)
 
@@ -161,15 +181,23 @@ function printerRequest(request, logString) {
                 // console.log("--------------->"+charset)
             }
         }
-        if (isPlaintext(reqByteString)) {
-            logString.append(splitLine(readBufferString(reqByteString, charset), "|   ")).append("\n")
-            logString.append("|").append("\n")
-            logString.append("|" + "--> END ").append("\n")
-        } else {
-            logString.append(splitLine("Base64[" + reqByteString.base64() + "]", "|   ")).append("\n")
+        //LOG Request Body
+        try {
+            if (isPlaintext(reqByteString)) {
+                logString.append(splitLine(readBufferString(reqByteString, charset), "|   ")).append("\n")
+                logString.append("|").append("\n")
+                logString.append("|" + "--> END ").append("\n")
+            } else {
+                logString.append(splitLine(hexToUtf8(reqByteString.hex()), "|   ")).append("\n")
+                logString.append("|").append("\n");
+                logString.append("|" + "--> END  (binary body omitted -> isPlaintext)").append("\n")
+            }
+        } catch (error) {
+            logString.append(splitLine(hexToUtf8(reqByteString.hex()), "|   ")).append("\n")
             logString.append("|").append("\n");
             logString.append("|" + "--> END  (binary body omitted -> isPlaintext)").append("\n")
         }
+
     }
     logString.append("|").append("\n");
 }
@@ -178,43 +206,46 @@ function printerRequest(request, logString) {
 function printerResponse(response, logString) {
     var newResponse = null;
     try {
-        var Charset = Java.use("java.nio.charset.Charset")
-        var defChatset = Charset.forName("UTF-8")
+        var defChatset = CharsetWapper.forName("UTF-8")
 
-        var request = getFieldValue(response,F_rsp_request)
-        var url = getFieldValue(request,F_req_url)
+        var request = getFieldValue(response, F_rsp_request)
+        var url = getFieldValue(request, F_req_url)
         var shielded = filterUrl(url.toString())
         if (shielded) {
+            logString.append("|" + "     File Response Body Omit.....").append("\n")
             return response;
         }
-
+        //URL
         logString.append("| URL: " + url).append("\n")
         logString.append("|").append("\n")
-        logString.append("| Status Code: " + getFieldValue(response,F_rsp_code) + " / " + getFieldValue(response,F_rsp_message)).append("\n")
+        logString.append("| Status Code: " + getFieldValue(response, F_rsp_code) + " / " + getFieldValue(response, F_rsp_message)).append("\n")
         logString.append("|").append("\n")
-        var responseBody = getFieldValue(response,F_rsp_body)
+        var responseBodyObj = getFieldValue(response, F_rsp_body)
+        var responseBody = getWrapper(responseBodyObj)
         var contentLength = responseBody[M_rspBody_contentLength]()
-        var resp_headers = getFieldValue(response,F_rsp_headers)
-        var respHeaderSize = getHeaderSize(resp_headers)
-        logString.append("| Headers:").append("\n")
-        if(respHeaderSize == 0){
+        //Headers
+        var resp_headers = getFieldValue(response, F_rsp_headers)
+        var respHeadersList = headersToList(resp_headers)
+        var respHeaderSize = getHeaderSize(respHeadersList)
+        logString.append("| Response Headers: ").append("" + respHeaderSize).append("\n")
+        if (respHeaderSize == 0) {
             logString.append("|     no headers").append("\n")
         }
         for (var i = 0; i < respHeaderSize; i++) {
             var tag = i == (respHeaderSize - 1) ? "└─" : "┌─"
-            logString.append("|   " + tag + getHeaderName(resp_headers,i) + ": " + getHeaderValue(resp_headers,i)).append("\n")
+            logString.append("|   " + tag + getHeaderName(respHeadersList, i) + ": " + getHeaderValue(respHeadersList, i)).append("\n")
         }
-
+        //Body
         var content = "";
-        var nobody = !hasBody(response)
+        var nobody = !hasBody(response, respHeadersList)
         if (nobody) {
-            logString.append("| No Body : "+ response).append("\n")
+            logString.append("| No Response Body : " + response).append("\n")
             logString.append("|" + "<-- END HTTP").append("\n")
-        } else if (bodyEncoded(resp_headers)) {
+        } else if (bodyEncoded(respHeadersList)) {
             logString.append("|" + "<-- END HTTP (encoded body omitted)").append("\n")
         } else {
             logString.append("| ").append("\n");
-            logString.append("| Body:").append("\n")
+            logString.append("| Response Body:").append("\n")
             var source = responseBody[M_rspBody_source]()
             var rspByteString = getByteString(source)
             var charset = defChatset
@@ -225,15 +256,25 @@ function printerResponse(response, logString) {
                     charset = appcharset
                 }
             }
+            //newResponse
             var mediaType = responseBody[M_rspBody_contentType]()
-            var class_responseBody = Java.use(Cls_ResponseBody)
-            var newBody = class_responseBody[M_rspBody_create](mediaType, rspByteString.toByteArray())
-            var newBuilder = response[M_rsp_newBuilder]()
+            var newBody = null;
+            try {
+                newBody = ResponseBodyWapper[M_rspBody_create](mediaType, rspByteString.toByteArray())
+            } catch (error) {
+                newBody = ResponseBodyWapper[M_rspBody_create](mediaType, readBufferString(rspByteString, charset))
+            }
+            var newBuilder = null;
+            if("" == M_rsp_newBuilder){
+                var ResponseBuilderClazz = response.class.getDeclaredClasses()[0]
+                newBuilder = Java.use(ResponseBuilderClazz.getName()).$new(response)
+            }else{
+                newBuilder = response[M_rsp_newBuilder]()
+            }
             var bodyField = newBuilder.class.getDeclaredField(F_rsp$builder_body)
             bodyField.setAccessible(true)
-            bodyField.set(newBuilder,newBody)
+            bodyField.set(newBuilder, newBody)
             newResponse = newBuilder[M_rsp$builder_build]()
-
 
             if (!isPlaintext(rspByteString)) {
                 logString.append("|" + "<-- END HTTP (binary body omitted)").append("\n");
@@ -243,7 +284,7 @@ function printerResponse(response, logString) {
                     var content = readBufferString(rspByteString, charset)
                     logString.append(splitLine(content, "|   ")).append("\n")
                 } catch (error) {
-                    logString.append(splitLine("Base64[" + rspByteString.base64() + "]", "|   ")).append("\n")
+                    logString.append(splitLine(hexToUtf8(rspByteString.hex()), "|   ")).append("\n")
                 }
 
                 logString.append("| ").append("\n");
@@ -251,7 +292,7 @@ function printerResponse(response, logString) {
             logString.append("|" + "<-- END HTTP").append("\n");
         }
     } catch (error) {
-        logString.append("print response error : "+ error).append("\n")
+        logString.append("print response error : " + error).append("\n")
         if (null == newResponse) {
             return response;
         }
@@ -259,95 +300,114 @@ function printerResponse(response, logString) {
     return newResponse;
 }
 
+/**
+ * hex to string
+ */
+function hexToUtf8(hex) {
+    return decodeURIComponent('%' + hex.match(/.{1,2}/g).join('%'));
+}
 
-function getFieldValue(object,fieldName){
+/**
+ * 
+ */
+function getFieldValue(object, fieldName) {
     var field = object.class.getDeclaredField(fieldName);
     field.setAccessible(true)
     var fieldValue = field.get(object)
-    if(null == fieldValue){
+    if (null == fieldValue) {
         return null;
     }
-    return Java.cast(fieldValue,Java.use(fieldValue.$className))
+    var FieldClazz = Java.use(fieldValue.$className)
+    var fieldValueWapper = Java.cast(fieldValue, FieldClazz)
+    return fieldValueWapper
 }
 
-
-function getWrapper(object){
+/**
+ * 
+ */
+function getWrapper(object) {
     var chooseInstance = null;
-    Java.choose(object.getClass().getName(),{
-
-        onMatch:function(instance){
-            if(object.equals(instance)){
+    Java.choose(object.getClass().getName(), {
+        onMatch: function (instance) {
+            if (object.equals(instance)) {
                 chooseInstance = instance;
+                return
             }
         },
-        onComplete : function(){
+        onComplete: function () {
         }
     })
     return chooseInstance
 }
 
-
-function getHeaderSize(headers){
-    return getFieldValue(headers,F_header_namesAndValues).length / 2
+/**
+ * 
+ */
+function headersToList(headers) {
+    var gson = GsonWapper.$new()
+    var namesAndValues = getFieldValue(headers, F_header_namesAndValues)
+    var jsonString = gson.toJson(namesAndValues)
+    var namesAndValuesList = Java.cast(gson.fromJson(jsonString, ListWapper.class), ListWapper)
+    return namesAndValuesList;
 }
 
-function getHeaderName(headers,index){
-    return getFieldValue(headers,F_header_namesAndValues)[index * 2]
-}
-function getHeaderValue(headers,index){
-    return getFieldValue(headers,F_header_namesAndValues)[(index * 2)+1]
+function getHeaderSize(namesAndValuesList) {
+    return namesAndValuesList.size() / 2
 }
 
-function getByHeader(headers,name){
-    Java.perform(function(){
-        var JavaString = Java.use("java.lang.String")
-        var GSON = Java.use("com.singleman.gson.Gson").$new()
-        var List = Java.use("java.util.List")
-        var namesAndValues = getFieldValue(headers,F_header_namesAndValues)
-        var namesAndValuesList = Java.cast(GSON.fromJson(GSON.toJson(namesAndValues),List.class),List)
+function getHeaderName(namesAndValuesList, index) {
+    return namesAndValuesList.get(index * 2)
+}
+function getHeaderValue(namesAndValuesList, index) {
+    return namesAndValuesList.get((index * 2) + 1)
+}
+
+function getByHeader(namesAndValuesList, name) {
+    var nameString = JavaStringWapper.$new(name)
+    Java.perform(function () {
         var length = namesAndValuesList.size()
+        var nameByList = "";
         do {
             length -= 2;
             if (length < 0) {
                 return null;
             }
-        } while (!JavaString.$new(name).equalsIgnoreCase(namesAndValuesList.get(length)));
-        return namesAndValuesList.get(length+1);
-    
+            // console.log("namesAndValuesList: "+namesAndValuesList.$className)
+            nameByList = namesAndValuesList.get(JavaIntegerWapper.valueOf(length).intValue())
+        } while (!nameString.equalsIgnoreCase(nameByList));
+        return namesAndValuesList.get(length + 1);
+
     })
 }
 
 
-
-function bodyEncoded(headers) {
-    if (null == headers) return false;
-    var javaString = Java.use("java.lang.String")
-    var contentEncoding = getByHeader(headers,"Content-Encoding")
-    return contentEncoding != null && !javaString.$new("identity").equalsIgnoreCase(contentEncoding)
+function bodyEncoded(namesAndValuesList) {
+    if (null == namesAndValuesList) return false;
+    var contentEncoding = getByHeader(namesAndValuesList, "Content-Encoding")
+    var bodyEncoded = contentEncoding != null && !JavaStringWapper.$new("identity").equalsIgnoreCase(contentEncoding)
+    return bodyEncoded
 
 }
 
 
-function hasBody(response) {
-    var javaString = Java.use("java.lang.String")
-    var request = getFieldValue(response,F_rsp_request)
-    var m = getFieldValue(request,F_req_method);
-    if (javaString.$new("HEAD").equals(m)) {
+function hasBody(response, namesAndValuesList) {
+    var request = getFieldValue(response, F_rsp_request)
+    var m = getFieldValue(request, F_req_method);
+    if (JavaStringWapper.$new("HEAD").equals(m)) {
         return false;
     }
     var Transfer_Encoding = "";
-    var resp_headers = getFieldValue(response,F_rsp_headers)
-    var respHeaderSize = getHeaderSize(resp_headers)
+    var respHeaderSize = getHeaderSize(namesAndValuesList)
     for (var i = 0; i < respHeaderSize; i++) {
-        if (javaString.$new("Transfer-Encoding").equals( getHeaderName(resp_headers,i))) {
-            Transfer_Encoding = getHeaderValue(resp_headers,i);
+        if (JavaStringWapper.$new("Transfer-Encoding").equals(getHeaderName(namesAndValuesList, i))) {
+            Transfer_Encoding = getHeaderValue(namesAndValuesList, i);
             break
         }
     }
-    var code = getFieldValue(response,F_rsp_code)
+    var code = getFieldValue(response, F_rsp_code)
     if (((code >= 100 && code < 200) || code == 204 || code == 304)
         && response[M_rspBody_contentLength] == -1
-        && !javaString.$new("chunked").equalsIgnoreCase(Transfer_Encoding)
+        && !JavaStringWapper.$new("chunked").equalsIgnoreCase(Transfer_Encoding)
     ) {
         return false;
     }
@@ -360,15 +420,13 @@ function isPlaintext(byteString) {
     try {
         var bufferSize = byteString.size()
         var buffer = NewBuffer(byteString)
-
         for (var i = 0; i < 16; i++) {
             if (bufferSize == 0) {
                 console.log("bufferSize == 0")
                 break
             }
             var codePoint = buffer.readUtf8CodePoint()
-            var Character = Java.use("java.lang.Character")
-            if (Character.isISOControl(codePoint) && !Character.isWhitespace(codePoint)) {
+            if (CharacterWapper.isISOControl(codePoint) && !CharacterWapper.isWhitespace(codePoint)) {
                 return false;
             }
         }
@@ -384,13 +442,12 @@ function isPlaintext(byteString) {
 
 function getByteString(buffer) {
     var bytearray = buffer[M_buffer_readByteArray]();
-    var byteString = Java.use("com.singleman.okio.ByteString").of(bytearray)
+    var byteString = OkioByteStrngWapper.of(bytearray)
     return byteString;
 }
 
 function NewBuffer(byteString) {
-    var bufferCls = Java.use("com.singleman.okio.Buffer");
-    var buffer = bufferCls.$new()
+    var buffer = OkioBufferWapper.$new()
     byteString.write(buffer)
     return buffer;
 }
@@ -398,13 +455,13 @@ function NewBuffer(byteString) {
 
 function readBufferString(byteString, chatset) {
     var byteArray = byteString.toByteArray();
-    var str = Java.use("java.lang.String").$new(byteArray, chatset)
+    var str = JavaStringWapper.$new(byteArray, chatset)
     return str;
 }
 
 function splitLine(string, tag) {
-    var newSB = Java.use("java.lang.StringBuilder").$new()
-    var newString = Java.use("java.lang.String").$new(string)
+    var newSB = JavaStringBufferWapper.$new()
+    var newString = JavaStringWapper.$new(string)
     var lineNum = Math.ceil(newString.length() / 150)
     for (var i = 0; i < lineNum; i++) {
         var start = i * 150;
@@ -417,7 +474,8 @@ function splitLine(string, tag) {
         }
         newSB.append("\n")
     }
-    return newSB.deleteCharAt(newSB.length() - 1).toString()
+    var lineStr = newSB.deleteCharAt(newSB.length() - 1).toString()
+    return lineStr
 }
 
 /**
@@ -449,35 +507,53 @@ function hookRealCall(realCallClassName) {
     Java.perform(function () {
 
         console.log(" ...........  hookRealCall  : " + realCallClassName)
-
         var RealCall = Java.use(realCallClassName)
         if ("" != Cls_CallBack) {
             //异步
             RealCall[M_Call_enqueue].overload(Cls_CallBack).implementation = function (callback) {
+                // console.log("-------------------------------------HOOK SUCCESS 异步--------------------------------------------------")
+                var interfaceClazz = callback.class;
+                var interfaceName = interfaceClazz.getName();
+                var interfaceWapper = Java.use(interfaceName);
+                var proxyCallback = Java.registerClass({
+                    name: "com.proxyCallback",
+                    implements: [interfaceWapper],
+                    methods: {
+                        [M_CallBack_onResponse]: function (call, response) {
+                            var newResponse = buildNewResponse(response)
+                            var methods = interfaceClazz.getDeclaredMethods();
+                            for (var i = 0; i < methods.length; i++) {
+                                var method = methods[i]
+                                method.setAccessible(true)
+                                if (method.getName() == M_CallBack_onResponse) {
+                                    method.invoke(callback, [call, newResponse])
+                                    break;
+                                }
+                            }
+                        },
+                        [M_CallBack_onFailure]: function (call, ex) {
+                            var methods = interfaceClazz.getDeclaredMethods();
+                            for (var i = 0; i < methods.length; i++) {
+                                var method = methods[i]
+                                method.setAccessible(true)
+                                if (method.getName() == M_CallBack_onFailure) {
+                                    method.invoke(callback, [call, ex])
+                                    break;
+                                }
+                            }
+                        }
+                    }
 
-                var realCallBackClassName = callback.$className
-                Java.use(realCallBackClassName)[M_CallBack_onResponse].overload(Cls_Call, Cls_Response).implementation = function (call, response) {
-
-                    // console.log("-------------------------------------HOOK SUCCESS 异步--------------------------------------------------")
-                    var newResponse = buildNewResponse(response)
-
-                    this[M_CallBack_onResponse](call, newResponse)
-
-                }
-
-                this[M_Call_enqueue](callback)
+                })
+                this[M_Call_enqueue](proxyCallback.$new())
             }
         }
 
         //同步  
         RealCall[M_Call_execute].overload().implementation = function () {
-
             // console.log("-------------------------------------HOOK SUCCESS 同步--------------------------------------------------")
-
             var response = this[M_Call_execute]()
-
             var newResponse = buildNewResponse(response)
-
             return newResponse;
         }
     })
@@ -507,7 +583,6 @@ function checkClass(name) {
     return true;
 }
 
-
 /**
 * print request history
 */
@@ -524,7 +599,6 @@ function history() {
                     console.log("-----> index[" + i + "]" + "    ????  M_Call_execute = \"\"")
                 }
                 console.log("")
-
             }
             console.log("")
         } catch (error) {
@@ -537,9 +611,7 @@ function history() {
 * resend request
 */
 function resend(index) {
-
     Java.perform(function () {
-
         try {
             console.log("resend >> " + index)
             var call = CallCache[index]
@@ -548,8 +620,6 @@ function resend(index) {
             } else {
                 console.log("M_Call_execute = null")
             }
-
-
         } catch (error) {
             console.log("Error : " + error)
         }
@@ -564,37 +634,45 @@ function resend(index) {
  */
 function hold() {
     Java.perform(function () {
+        //Init common
+        JavaStringWapper = Java.use("java.lang.String")
+        JavaStringBufferWapper = Java.use("java.lang.StringBuilder")
+        JavaIntegerWapper = Java.use("java.lang.Integer")
+        GsonWapper = Java.use("com.singleman.gson.Gson")
+        ListWapper = Java.use("java.util.List")
+        ArraysWapper = Java.use("java.util.Arrays")
+        ArrayListWapper = Java.use("java.util.ArrayList")
+        CharsetWapper = Java.use("java.nio.charset.Charset")
+        CharacterWapper = Java.use("java.lang.Character")
 
-        Java.openClassFile("/data/local/tmp/okhttpfind.dex").load()
+        OkioByteStrngWapper = Java.use("com.singleman.okio.ByteString")
+        OkioBufferWapper = Java.use("com.singleman.okio.Buffer")
 
-        var OkHttpClient = Java.use(Cls_OkHttpClient)
+        //Init OKHTTP
+        OkHttpClientWapper = Java.use(Cls_OkHttpClient)
+        ResponseBodyWapper = Java.use(Cls_ResponseBody)
+        BufferWapper = Java.use(Cls_okio_Buffer)
 
-        OkHttpClient[M_Client_newCall].overload(Cls_Request).implementation = function (request) {
-
+        //Start Hook
+        OkHttpClientWapper[M_Client_newCall].overload(Cls_Request).implementation = function (request) {
             var call = this[M_Client_newCall](request)
-
             try {
                 CallCache.push(call["clone"]())
             } catch (error) {
                 console.log("not fount clone method!")
             }
-
-
             var realCallClassName = call.$className
-
             if (!alreadyHook(realCallClassName)) {
                 hookedArray.push(realCallClassName)
                 hookRealCall(realCallClassName)
             }
             return call;
         }
-
     })
 }
 
 function switchLoader(clientName) {
     Java.perform(function () {
-
         if ("" != clientName) {
             try {
                 var clz = Java.classFactory.loader.findClass(clientName)
@@ -618,23 +696,13 @@ function switchLoader(clientName) {
                     },
                     onComplete: function () {
                         console.log("")
-                        try {
-                            if (Java.classFactory.loader.findClass("okhttp3.Protocol")) {
-                                console.log("Switch ClassLoader Success !")
-                            }
-                        } catch (error) {
-                            console.log("Switch ClassLoader Failed !")
-                        }
-
+                        console.log("Switch ClassLoader Complete !")
                         console.log("")
                     }
 
                 })
             }
         }
-
-
-
     })
 }
 
@@ -644,12 +712,16 @@ function switchLoader(clientName) {
  */
 function find() {
     Java.perform(function () {
+        ArraysWapper = Java.use("java.util.Arrays")
+        ArrayListWapper = Java.use("java.util.ArrayList")
         var isSupport = false;
-
+        var clz_Protocol = null;
         try {
-            var Arrays = Java.use("java.util.Arrays")
-            var clz_Protocol = null;
             var clazzNameList = Java.enumerateLoadedClassesSync()
+            if (clazzNameList.length == 0) {
+                console.log("ERROR >> [enumerateLoadedClasses] return null !!!!!!")
+                return
+            }
             for (var i = 0; i < clazzNameList.length; i++) {
                 var name = clazzNameList[i]
                 if (!checkClass(name)) {
@@ -657,14 +729,14 @@ function find() {
                 }
                 try {
                     var loadedClazz = Java.classFactory.loader.loadClass(name);
-                    if(loadedClazz.isEnum()){
+                    if (loadedClazz.isEnum()) {
                         var Protocol = Java.use(name);
-                        var toString = Arrays.toString(Protocol.values());
-                        if(toString.indexOf("http/1.0")!=-1 
+                        var toString = ArraysWapper.toString(Protocol.values());
+                        if (toString.indexOf("http/1.0") != -1
                             && toString.indexOf("http/1.1") != -1
                             && toString.indexOf("spdy/3.1") != -1
                             && toString.indexOf("h2") != -1
-                        ){
+                        ) {
                             clz_Protocol = loadedClazz;
                             break;
                         }
@@ -672,11 +744,11 @@ function find() {
                 } catch (error) {
                 }
             }
-            if(null == clz_Protocol){
-				console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~Not Support[没有找到okhttp特征类]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+            if (null == clz_Protocol) {
+                console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~ 寻找okhttp特征失败，请确认是否使用okhttp ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
                 return
             }
-          
+
             //enum values >> Not to be confused with!
             var okhttp_pn = clz_Protocol.getPackage().getName();
             var likelyOkHttpClient = okhttp_pn + ".OkHttpClient"
@@ -696,16 +768,12 @@ function find() {
             isSupport = false;
         }
 
-        if(!isSupport){
-			console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~Not Support[没有找到okhttp特征类]~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        if (!isSupport) {
+            console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~ 寻找okhttp特征失败，请确认是否使用okhttp ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
             return
         }
 
-        var likelyClazzList = Java.use("java.util.ArrayList").$new()
-
-        console.log("")
-        console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~Start Find~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
-
+        var likelyClazzList = ArrayListWapper.$new()
         for (var i = 0; i < clazzNameList.length; i++) {
             var name = clazzNameList[i]
             if (!checkClass(name)) {
@@ -718,49 +786,48 @@ function find() {
             }
         }
 
+        console.log("likelyClazzList size :" + likelyClazzList.size())
+        if (likelyClazzList.size() == 0) {
+            console.log("Please make a network request and try again!")
+        }
 
-        Java.openClassFile("/data/local/tmp/okhttpfind.dex").load()
+        console.log("")
+        console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~Start Find~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        console.log("")
+        try {
+            var OkHttpFinder = Java.use("com.singleman.okhttp.OkHttpFinder")
+            OkHttpFinder.getInstance().findClassInit(likelyClazzList)
 
-        Java.use("com.singleman.okhttp.OKLog").debugLog.implementation = function (message) {
-            if (message.indexOf("Start Find") != -1) {
-                console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~Find Result~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
-            }else if (message.indexOf("Find Complete") != -1) {
-                var OkCompatClazz = Java.use("com.singleman.okhttp.OkCompat").class
-                var fields = OkCompatClazz.getDeclaredFields();
-                for (var i = 0; i < fields.length; i++) {
-                    var field = fields[i]
-                    field.setAccessible(true);
-                    var name = field.getName()
-                    var value = field.get(null)
+            console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~Find Result~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
 
-                    console.log("var " + name + " = \"" + value + "\";")
-                }
-
-                console.log("")
-                console.log("")
-                console.log(message)
-            }else{
-                // console.log(message)
+            var OkCompatClazz = Java.use("com.singleman.okhttp.OkCompat").class
+            var fields = OkCompatClazz.getDeclaredFields();
+            for (var i = 0; i < fields.length; i++) {
+                var field = fields[i]
+                field.setAccessible(true);
+                var name = field.getName()
+                var value = field.get(null)
+                console.log("var " + name + " = \"" + value + "\";")
             }
+            console.log("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~Find Complete~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+
+        } catch (error) {
+            console.log(error)
+            console.log(Java.use("android.util.Log").getStackTraceString(error))
         }
 
-        Java.use("com.singleman.okhttp.OKLog").debugException.implementation = function (ex) {
-            console.log(Java.use("android.util.Log").getStackTraceString(ex))
-        }
-
-        var OkHttpFinder = Java.use("com.singleman.okhttp.OkHttpFinder")
-
-        OkHttpFinder.getInstance().findClassInit(likelyClazzList)
     })
-
 }
+
 /**
  * 
  */
 function main() {
     Java.perform(function () {
+        Java.openClassFile("/data/local/tmp/okhttpfind.dex").load()
+        var version = Java.use("com.singleman.SingleMan").class.getDeclaredField("version").get(null)
         console.log("");
-        console.log("------------------------- OkHttp Poker by SingleMan ------------------------------------");
+        console.log("------------------------- OkHttp Poker by SingleMan ["+version+"]------------------------------------");
         console.log("API:")
         console.log("   >>>  find()                                         检查是否使用了Okhttp & 是否可能被混淆 & 寻找okhttp3关键类及函数");
         console.log("   >>>  switchLoader(\"okhttp3.OkHttpClient\")           参数：静态分析到的okhttpclient类名");
@@ -772,23 +839,4 @@ function main() {
     })
 }
 
-
 setImmediate(main)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
